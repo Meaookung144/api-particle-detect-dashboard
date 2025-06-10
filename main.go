@@ -21,6 +21,8 @@ type Config struct {
 	SupabaseURL    string
 	SupabaseKey    string
 	UploadDir      string
+	ParticleDir      string
+	LabelDir      string
 	ServerPort     string
 	ThumbnailsDir  string
 }
@@ -55,11 +57,15 @@ func init() {
 		SupabaseURL:    getEnv("SUPABASE_URL", ""),
 		SupabaseKey:    getEnv("SUPABASE_KEY", ""),
 		UploadDir:      getEnv("UPLOAD_DIR", "uploads"),
+		ParticleDir:      getEnv("PARTICLE_DIR", "particle"),
+		LabelDir:      getEnv("LABEL_DIR", "label"),
 		ThumbnailsDir:  getEnv("THUMBNAILS_DIR", "thumbnails"),
 		ServerPort:     getEnv("SERVER_PORT", "8080"),
 	}
 
 	os.MkdirAll(config.UploadDir, os.ModePerm)
+	os.MkdirAll(config.ParticleDir, os.ModePerm)
+	os.MkdirAll(config.LabelDir, os.ModePerm)
 	os.MkdirAll(config.ThumbnailsDir, os.ModePerm)
 
 	supabaseClient = supabase.CreateClient(config.SupabaseURL, config.SupabaseKey)
@@ -71,9 +77,12 @@ func main() {
 	r.HandleFunc("/api/upload", uploadImageHandler).Methods("POST")
 	r.HandleFunc("/health", healthCheckHandler).Methods("GET")
 	r.HandleFunc("/api/file/uploads/{file_name}", serveImageHandler).Methods("GET")
+	r.HandleFunc("/api/file/particle/{file_name}", serveParticleHandler).Methods("GET")
+	r.HandleFunc("/api/file/label/{file_name}", serveLabelHandler).Methods("GET")
 	r.HandleFunc("/api/list/machine/image/{id}", listMachineImagesHandler).Methods("GET")
 	r.HandleFunc("/api/list/machine/image", listUserMachineImagesHandler).Methods("GET")
-
+	r.HandleFunc("/api/result", resultSummaryHandler).Methods("GET")
+	r.HandleFunc("/api/list/label/{image_id}", listLabelHandler).Methods("GET")	
 
 	handler := corsMiddleware(r)
 
@@ -175,6 +184,32 @@ func serveImageHandler(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filePath)
 }
 
+func serveParticleHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	fileName := vars["file_name"]
+	filePath := filepath.Join(config.ParticleDir, fileName)
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		http.NotFound(w, r)
+		return
+	}
+
+	http.ServeFile(w, r, filePath)
+}
+
+func serveLabelHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	fileName := vars["file_name"]
+	filePath := filepath.Join(config.LabelDir, fileName)
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		http.NotFound(w, r)
+		return
+	}
+
+	http.ServeFile(w, r, filePath)
+}
+
 func listMachineImagesHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	machineID := vars["id"]
@@ -185,12 +220,21 @@ func listMachineImagesHandler(w http.ResponseWriter, r *http.Request) {
 		respondWithError(w, http.StatusInternalServerError, "Failed to fetch images")
 		return
 	}
-
-	baseURL := fmt.Sprintf("%s/api/file/uploads", r.Host)
+ 
 	for i := range images {
-		images[i].Filename = fmt.Sprintf("http://%s/%s", baseURL, images[i].Filename)
+		var fileLocation string
+		if images[i].Status == "pending" {
+			fileLocation = "file/uploads"
+		} else if images[i].Status == "detected" {
+			fileLocation = "file/label"
+		} else {
+			fileLocation = "file/uploads" // fallback
+		}
+	
+		images[i].Filename = fmt.Sprintf("http://%s/api/%s/%s", r.Host, fileLocation, images[i].Filename)
+	
 		if images[i].ThumbnailFilename != nil {
-			thumbnailURL := fmt.Sprintf("http://%s/%s", baseURL, *images[i].ThumbnailFilename)
+			thumbnailURL := fmt.Sprintf("http://%s/api/%s/%s", r.Host, "file/uploads", *images[i].ThumbnailFilename)
 			images[i].ThumbnailFilename = &thumbnailURL
 		}
 	}
@@ -251,6 +295,80 @@ func listUserMachineImagesHandler(w http.ResponseWriter, r *http.Request) {
     respondWithJSON(w, http.StatusOK, images)
 }
 
+func resultSummaryHandler(w http.ResponseWriter, r *http.Request) {
+	var images []ImageRecord
+	err := supabaseClient.DB.From("images").Select("id, status").Execute(&images)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to fetch images")
+		return
+	}
+
+	summary := map[string]interface{}{
+		"total_images":    len(images),
+		"pending":         0,
+		"detected":        0,
+		"fail":            0,
+		"total_particles": 0,
+		"particles":       map[string]int{},
+	}
+
+	for _, img := range images {
+		switch img.Status {
+		case "pending":
+			summary["pending"] = summary["pending"].(int) + 1
+		case "detected":
+			summary["detected"] = summary["detected"].(int) + 1
+		case "fail":
+			summary["fail"] = summary["fail"].(int) + 1
+		}
+	}
+
+	var particles []map[string]interface{}
+	err = supabaseClient.DB.From("particles").Select("class").Limit(10000).Execute(&particles)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Failed to fetch particles")
+		return
+	}
+
+	particleCounts := map[string]int{}
+	for _, p := range particles {
+		if class, ok := p["class"].(string); ok {
+			particleCounts[class]++
+		}
+	}
+
+	summary["total_particles"] = len(particles)
+	summary["particles"] = particleCounts
+
+	respondWithJSON(w, http.StatusOK, summary)
+}
+
+func listLabelHandler(w http.ResponseWriter, r *http.Request) {
+	imageID := mux.Vars(r)["image_id"]
+
+	var particles []map[string]interface{}
+	err := supabaseClient.DB.From("particles").Select("*").Eq("image_id", imageID).Execute(&particles)
+	if err != nil {
+		log.Printf("❌ Supabase error: %v", err)
+		respondWithError(w, http.StatusInternalServerError, "Failed to fetch particles")
+		return
+	}
+
+	log.Printf("✅ Particles fetched for imageID=%s: %+v", imageID, particles)
+
+	var urls []string
+	for _, p := range particles {
+		if filename, ok := p["particle_filename"].(string); ok && filename != "" {
+			url := fmt.Sprintf("http://%s/api/file/particle/%s", r.Host, filename)
+			urls = append(urls, url)
+		}
+	}
+
+	respondWithJSON(w, http.StatusOK, urls)
+}
+
+
+ 
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

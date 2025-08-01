@@ -8,6 +8,9 @@ import ssl
 from PIL import Image
 from dotenv import load_dotenv
 from supabase import create_client, Client
+import shutil
+shutil.rmtree(os.path.expanduser("~/.cache/torch/hub"), ignore_errors=True)
+
 
 # === Load environment variables ===
 load_dotenv()
@@ -25,44 +28,13 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # === Load model with SSL fix ===
 def load_model():
     try:
-        # Method 1: Try loading with SSL certificate fix
-        print("🔧 Loading model with SSL fix...")
-        ssl._create_default_https_context = ssl._create_unverified_context
-        model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=True)
-        print("✅ Model loaded successfully with SSL fix")
+        print("🔧 Trying ultralytics package...")
+        from ultralytics import YOLO
+        model = YOLO('best.pt')
+        print("✅ Model loaded with ultralytics package")
         return model
     except Exception as e:
-        print(f"❌ SSL fix failed: {e}")
-        
-        try:
-            # Method 2: Try loading from local cache (no internet required)
-            print("🔧 Trying to load from local cache...")
-            model = torch.hub.load('ultralytics/yolov5', 'custom', path='best.pt', force_reload=False)
-            print("✅ Model loaded from local cache")
-            return model
-        except Exception as e2:
-            print(f"❌ Local cache failed: {e2}")
-            
-            try:
-                # Method 3: Try loading with local YOLOv5 repo
-                print("🔧 Trying to load from local YOLOv5 repository...")
-                model = torch.hub.load('./yolov5', 'custom', path='best.pt', source='local')
-                print("✅ Model loaded from local repository")
-                return model
-            except Exception as e3:
-                print(f"❌ Local repository failed: {e3}")
-                
-                try:
-                    # Method 4: Try using ultralytics package (if installed)
-                    print("🔧 Trying ultralytics package...")
-                    from ultralytics import YOLO
-                    model = YOLO('best.pt')
-                    print("✅ Model loaded with ultralytics package")
-                    return model
-                except Exception as e4:
-                    print(f"❌ Ultralytics package failed: {e4}")
-                    print("💡 Please install ultralytics: pip install ultralytics")
-                    raise RuntimeError("All model loading methods failed. Please check your internet connection, SSL certificates, or install ultralytics package.")
+        print(f"❌ Ultralytics package failed: {e}")
 
 # === Draw labeled image with class + confidence ===
 def draw_labeled_image(image_path, particles, output_path):
